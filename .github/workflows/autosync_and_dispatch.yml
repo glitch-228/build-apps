@@ -63,9 +63,18 @@ jobs:
           # Use PAT so updating .github/workflows/** is allowed
           git remote set-url origin "https://x-access-token:${TOKEN}@github.com/${{ github.repository }}.git"
           git push origin HEAD:${TARGET_BRANCH}
-      - name: Dispatch build_release on updated branch
-        # On manual run -> always; on schedule -> only if you want, remove condition to always run
-        if: github.event_name == 'workflow_dispatch'
+      - name: Dispatch build_release on my fork
         env:
-          GH_TOKEN: ${{ secrets.WORKFLOW_TOKEN }}   # gh CLI reads GH_TOKEN
-        run: gh workflow run "${BUILD_WORKFLOW_FILE}" --ref "${TARGET_BRANCH}"
+          TOKEN: ${{ secrets.WORKFLOW_TOKEN }}           # fine-grained PAT
+        run: |
+          set -euo pipefail
+          REPO="${{ github.repository }}"                # e.g. glitch-228/build-apps
+          WORKFLOW="${{ env.BUILD_WORKFLOW_FILE }}"      # e.g. build_release.yml
+          REF="${{ env.TARGET_BRANCH }}"                 # e.g. global
+      
+          curl -s -X POST \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${REPO}/actions/workflows/${WORKFLOW}/dispatches" \
+            -d "{\"ref\":\"${REF}\"}"
+          echo "✅ Dispatched ${WORKFLOW} on ${REPO}@${REF}"
