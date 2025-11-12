@@ -54,7 +54,7 @@ jobs:
   call-upstream:
     needs: detect
     if: needs.detect.outputs.should_build == 'true'
-    uses: DokiTeam/Doki/.github/workflows/build_release.yml@base
+    uses: DokiTeam/build-apps/.github/workflows/build_release.yml@base
     # If the upstream workflow defines inputs, pass them here:
     # with:
     #   upstream_sha: ${{ needs.detect.outputs.sha }}
