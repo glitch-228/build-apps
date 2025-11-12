@@ -67,6 +67,7 @@ jobs:
         if: steps.gate.outputs.build == 'true'
         run: |
           set -euo pipefail
+
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
@@ -75,29 +76,38 @@ jobs:
 
           PRE_SHA=$(git rev-parse HEAD)
 
-          # 1) Merge, preferring UPSTREAM on conflicts (-X theirs only applies to conflicting hunks)
+          # 1) Merge, preferring UPSTREAM on conflicts (-X theirs only affects conflicting hunks)
           git merge -X theirs --no-edit "upstream/${UPSTREAM_REF}"
 
           # 2) Restore our versions for exception paths from PRE_SHA
-          CHANGED_EXCEPTIONS=0
+          RESTORED=0
           while read -r p; do
             [ -z "$p" ] && continue
             if git cat-file -e "$PRE_SHA:$p" 2>/dev/null; then
               git restore --source="$PRE_SHA" -- "$p" || true
-              CHANGED_EXCEPTIONS=1
+              git add -- "$p" || true
+              RESTORED=1
             fi
-          done <<< "${EXCEPTIONS}"
+          done <<'EOF'
+          README.md
+          .github/workflows/autosync_and_dispatch.yml
+          EOF
 
           POST_SHA=$(git rev-parse HEAD)
 
-          # 3) If HEAD changed (merge created a commit or FF), or we restored exceptions, push.
-          if [ "$PRE_SHA" != "$POST_SHA" ] || [ "$CHANGED_EXCEPTIONS" -eq 1 ]; then
-            git add -A
-            # commit only if we restored exceptions (merge already created a commit)
-            if [ "$CHANGED_EXCEPTIONS" -eq 1 ]; then
-              git commit -m "sync: prefer upstream (theirs), keep local exceptions; upstream=${POST_SHA}"
-              POST_SHA=$(git rev-parse HEAD)
-            fi
+          # 3) If HEAD changed (merge created a commit) or we restored exceptions, push.
+          #    Commit ONLY when something is staged; otherwise `git commit` would exit 1.
+          NEED_PUSH=0
+          if [ "$PRE_SHA" != "$POST_SHA" ]; then
+            NEED_PUSH=1
+          fi
+
+          if ! git diff --cached --quiet; then
+            git commit -m "sync: prefer upstream (theirs), keep local exceptions; upstream=$(git rev-parse --short upstream/${UPSTREAM_REF})"
+            NEED_PUSH=1
+          fi
+
+          if [ "$NEED_PUSH" -eq 1 ]; then
             git push origin "HEAD:${TARGET_BRANCH}"
             echo "pushed=true" >> "$GITHUB_OUTPUT"
           else
@@ -105,11 +115,12 @@ jobs:
             echo "pushed=false" >> "$GITHUB_OUTPUT"
           fi
 
-
       - name: Dispatch build_release.yml on our branch
-        if: steps.gate.outputs.build == 'true'
+        # manual run => always dispatch; on schedule => dispatch only if gate opened
+        if: github.event_name == 'workflow_dispatch' || steps.gate.outputs.build == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh workflow run "${BUILD_WORKFLOW_FILE}" --ref "${TARGET_BRANCH}"
           echo "📣 Dispatched ${BUILD_WORKFLOW_FILE} on ${TARGET_BRANCH} (event=${{ github.event_name }})"
+
