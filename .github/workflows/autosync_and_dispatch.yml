@@ -1,62 +1,106 @@
-name: Orchestrate upstream build_release (priority upstream)
+name: Auto-sync upstream (prefer upstream) and run build_release
 
 on:
   schedule:
-    - cron: "17 3 * * *"          # daily at 03:17 UTC
-  workflow_dispatch: {}            # manual run => always build
+    - cron: "17 3 * * *"   # daily at 03:17 UTC
+  workflow_dispatch: {}    # manual "Run workflow" => always build
 
 permissions:
-  contents: write                  # allow creating releases in your fork
-  actions: read
+  contents: write          # allow pushing merge and updating files
+  actions: write           # allow dispatching another workflow
 
 concurrency:
-  group: upstream-orchestrator-${{ github.ref_name }}
+  group: autosync-${{ github.ref_name }}
   cancel-in-progress: false
 
 env:
+  # --- configure these for your setup ---
   UPSTREAM_OWNER: DokiTeam
   UPSTREAM_REPO: build-apps
-  UPSTREAM_REF: global               # branch in the original repo to follow
+  UPSTREAM_REF: global         # upstream branch to follow
+  TARGET_BRANCH: global      # your fork branch that holds workflows
+  BUILD_WORKFLOW_FILE: build_release.yml
+  # Files that must ALWAYS keep your fork's version:
+  EXCEPTIONS: |
+    README.md
+    .github/workflows/autosync_and_dispatch.yml
 
 jobs:
-  detect:
+  sync-and-dispatch:
     runs-on: ubuntu-latest
-    outputs:
-      sha: ${{ steps.get.outputs.sha }}
-      should_build: ${{ steps.gate.outputs.should_build }}
+
     steps:
-      - name: Resolve upstream HEAD
-        id: get
+      - name: Checkout fork branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TARGET_BRANCH }}
+          fetch-depth: 0
+
+      - name: Resolve latest upstream SHA
+        id: up
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           SHA=$(gh api repos/${UPSTREAM_OWNER}/${UPSTREAM_REPO}/commits/${UPSTREAM_REF} --jq .sha)
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "Latest upstream: $SHA"
 
-      - name: Decide to build
+      - name: Decide whether to build (manual => always)
         id: gate
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git remote add upstream https://github.com/${UPSTREAM_OWNER}/${UPSTREAM_REPO}.git || true
+          git fetch upstream ${{ env.UPSTREAM_REF }} --depth=1
+          # Build only if upstream commit isn't already contained in our branch
+          if git merge-base --is-ancestor "${{ steps.up.outputs.sha }}" HEAD; then
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "✅ Our branch already contains upstream commit — skipping scheduled build."
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            echo "🛠️ Upstream has new commits — will merge and build."
+          fi
+
+      - name: Merge upstream (prefer upstream / keep local exceptions)
+        if: steps.gate.outputs.build == 'true'
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/${UPSTREAM_OWNER}/${UPSTREAM_REPO}.git || true
+          git fetch upstream ${{ env.UPSTREAM_REF }}
+
+          PRE_SHA=$(git rev-parse HEAD)
+
+          # 1) Merge, preferring UPSTREAM on conflicts
+          #    (-X theirs applies to conflicting hunks; non-conflicting upstream changes are merged normally)
+          git merge -X theirs --no-edit "upstream/${UPSTREAM_REF}" || true
+
+          # 2) Restore our versions for exception paths from PRE_SHA
+          CHANGED=0
+          while read -r p; do
+            [ -z "$p" ] && continue
+            if git cat-file -e "$PRE_SHA:$p" 2>/dev/null; then
+              git restore --source="$PRE_SHA" -- "$p" || true
+              CHANGED=1
+            fi
+          done <<< "${EXCEPTIONS}"
+
+          # 3) Commit & push only if anything changed
+          if ! git diff --quiet || [ "$CHANGED" -eq 1 ]; then
+            git add -A
+            git commit -m "sync: prefer upstream (theirs), keep local exceptions; upstream=${{ steps.up.outputs.sha }}"
+            git push origin "HEAD:${TARGET_BRANCH}"
+          else
+            echo "No effective changes after merge/restore."
+          fi
+
+      - name: Dispatch build_release.yml on our branch
+        if: steps.gate.outputs.build == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "should_build=true" >> "$GITHUB_OUTPUT"; exit 0
-          fi
-          TAG="upstream-${{ steps.get.outputs.sha }}"
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "should_build=false" >> "$GITHUB_OUTPUT"
-            echo "✅ Already released $TAG — skipping."
-          else
-            echo "should_build=true" >> "$GITHUB_OUTPUT"
-            echo "🛠️ New upstream ${TAG} — will build."
-          fi
-
-  # 👉 Call the upstream workflow (reusable) so it has priority over your fork’s copy.
-  call-upstream:
-    needs: detect
-    if: needs.detect.outputs.should_build == 'true'
-    uses: DokiTeam/build-apps/.github/workflows/build_release.yml@base
-    # If the upstream workflow defines inputs, pass them here:
-    # with:
-    #   upstream_sha: ${{ needs.detect.outputs.sha }}
-    # Inherit your fork’s secrets to the called workflow:
-    secrets: inherit
+          gh workflow run "${BUILD_WORKFLOW_FILE}" --ref "${TARGET_BRANCH}"
+          echo "📣 Dispatched ${BUILD_WORKFLOW_FILE} on ${TARGET_BRANCH} (event=${{ github.event_name }})"
