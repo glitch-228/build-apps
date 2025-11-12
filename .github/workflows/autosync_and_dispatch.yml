@@ -3,7 +3,7 @@ name: Auto-sync upstream and run build_release
 on:
   schedule:
     - cron: "17 3 * * *"  # daily at 03:17 UTC
-  workflow_dispatch: {}
+  workflow_dispatch: {}    # manual "Run workflow" button
 
 permissions:
   contents: write   # push updates
@@ -12,14 +12,13 @@ permissions:
 concurrency:
   group: autosync-${{ github.ref_name }}
   cancel-in-progress: false
-
+  
 env:
-  # ✏️ set these to the original repo/branch you follow,
-  # and your fork's default branch:
   UPSTREAM_OWNER: DokiTeam
   UPSTREAM_REPO: build-apps
   UPSTREAM_REF: global
   TARGET_BRANCH: global
+
 
 jobs:
   sync-and-dispatch:
@@ -42,6 +41,7 @@ jobs:
           echo "ahead=$AHEAD" >> $GITHUB_OUTPUT
           if [ "$AHEAD" -gt 0 ]; then echo "changed=true" >> $GITHUB_OUTPUT; else echo "changed=false" >> $GITHUB_OUTPUT; fi
 
+      # Only push when there are new commits; manual runs still build even if unchanged.
       - name: Fast-forward fork
         if: steps.diff.outputs.changed == 'true'
         run: |
@@ -49,11 +49,12 @@ jobs:
           git merge --ff-only upstream/${UPSTREAM_REF}
           git push origin HEAD:${TARGET_BRANCH}
 
-      # Dispatch the real build workflow on the UPDATED ref
-      - name: Run build_release.yml on updated branch
-        if: steps.diff.outputs.changed == 'true'
+      # ✅ On manual run -> always dispatch
+      # ✅ On schedule    -> dispatch only if upstream changed
+      - name: Run build_release.yml on selected branch
+        if: github.event_name == 'workflow_dispatch' || steps.diff.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh workflow run build_release.yml --ref ${TARGET_BRANCH}
-          echo "Dispatched build_release.yml on ${TARGET_BRANCH}"
+          echo "Dispatched build_release.yml on ${TARGET_BRANCH} (event=${{ github.event_name }})"
