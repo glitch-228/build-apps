@@ -1,60 +1,62 @@
-name: Auto-sync upstream and run build_release
+name: Orchestrate upstream build_release (priority upstream)
 
 on:
   schedule:
-    - cron: "17 3 * * *"  # daily at 03:17 UTC
-  workflow_dispatch: {}    # manual "Run workflow" button
+    - cron: "17 3 * * *"          # daily at 03:17 UTC
+  workflow_dispatch: {}            # manual run => always build
 
 permissions:
-  contents: write   # push updates
-  actions: write    # dispatch another workflow
+  contents: write                  # allow creating releases in your fork
+  actions: read
 
 concurrency:
-  group: autosync-${{ github.ref_name }}
+  group: upstream-orchestrator-${{ github.ref_name }}
   cancel-in-progress: false
-  
+
 env:
   UPSTREAM_OWNER: DokiTeam
   UPSTREAM_REPO: build-apps
-  UPSTREAM_REF: global
-  TARGET_BRANCH: global
-
+  UPSTREAM_REF: global               # branch in the original repo to follow
 
 jobs:
-  sync-and-dispatch:
+  detect:
     runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.get.outputs.sha }}
+      should_build: ${{ steps.gate.outputs.should_build }}
     steps:
-      - name: Checkout fork
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Add upstream & fetch
-        run: |
-          git remote add upstream https://github.com/${UPSTREAM_OWNER}/${UPSTREAM_REPO}.git || true
-          git fetch upstream ${UPSTREAM_REF}
-
-      - name: Detect if upstream is ahead
-        id: diff
-        run: |
-          AHEAD=$(git rev-list --count origin/${TARGET_BRANCH}..upstream/${UPSTREAM_REF} || echo 0)
-          echo "ahead=$AHEAD" >> $GITHUB_OUTPUT
-          if [ "$AHEAD" -gt 0 ]; then echo "changed=true" >> $GITHUB_OUTPUT; else echo "changed=false" >> $GITHUB_OUTPUT; fi
-
-      # Only push when there are new commits; manual runs still build even if unchanged.
-      - name: Fast-forward fork
-        if: steps.diff.outputs.changed == 'true'
-        run: |
-          git checkout ${TARGET_BRANCH}
-          git merge --ff-only upstream/${UPSTREAM_REF}
-          git push origin HEAD:${TARGET_BRANCH}
-
-      # ✅ On manual run -> always dispatch
-      # ✅ On schedule    -> dispatch only if upstream changed
-      - name: Run build_release.yml on selected branch
-        if: github.event_name == 'workflow_dispatch' || steps.diff.outputs.changed == 'true'
+      - name: Resolve upstream HEAD
+        id: get
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh workflow run build_release.yml --ref ${TARGET_BRANCH}
-          echo "Dispatched build_release.yml on ${TARGET_BRANCH} (event=${{ github.event_name }})"
+          SHA=$(gh api repos/${UPSTREAM_OWNER}/${UPSTREAM_REPO}/commits/${UPSTREAM_REF} --jq .sha)
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Decide to build
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "should_build=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          TAG="upstream-${{ steps.get.outputs.sha }}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+            echo "✅ Already released $TAG — skipping."
+          else
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+            echo "🛠️ New upstream ${TAG} — will build."
+          fi
+
+  # 👉 Call the upstream workflow (reusable) so it has priority over your fork’s copy.
+  call-upstream:
+    needs: detect
+    if: needs.detect.outputs.should_build == 'true'
+    uses: DokiTeam/Doki/.github/workflows/build_release.yml@base
+    # If the upstream workflow defines inputs, pass them here:
+    # with:
+    #   upstream_sha: ${{ needs.detect.outputs.sha }}
+    # Inherit your fork’s secrets to the called workflow:
+    secrets: inherit
