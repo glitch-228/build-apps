@@ -1,6 +1,7 @@
 name: Build Release Artifact
 
 on:
+  workflow_dispatch: {}
   workflow_call:
   
 env:
