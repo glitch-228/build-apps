@@ -69,33 +69,42 @@ jobs:
           set -euo pipefail
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
           git remote add upstream https://github.com/${UPSTREAM_OWNER}/${UPSTREAM_REPO}.git || true
-          git fetch upstream ${{ env.UPSTREAM_REF }}
+          git fetch upstream "${UPSTREAM_REF}"
 
           PRE_SHA=$(git rev-parse HEAD)
 
-          # 1) Merge, preferring UPSTREAM on conflicts
-          #    (-X theirs applies to conflicting hunks; non-conflicting upstream changes are merged normally)
-          git merge -X theirs --no-edit "upstream/${UPSTREAM_REF}" || true
+          # 1) Merge, preferring UPSTREAM on conflicts (-X theirs only applies to conflicting hunks)
+          git merge -X theirs --no-edit "upstream/${UPSTREAM_REF}"
 
           # 2) Restore our versions for exception paths from PRE_SHA
-          CHANGED=0
+          CHANGED_EXCEPTIONS=0
           while read -r p; do
             [ -z "$p" ] && continue
             if git cat-file -e "$PRE_SHA:$p" 2>/dev/null; then
               git restore --source="$PRE_SHA" -- "$p" || true
-              CHANGED=1
+              CHANGED_EXCEPTIONS=1
             fi
           done <<< "${EXCEPTIONS}"
 
-          # 3) Commit & push only if anything changed
-          if ! git diff --quiet || [ "$CHANGED" -eq 1 ]; then
+          POST_SHA=$(git rev-parse HEAD)
+
+          # 3) If HEAD changed (merge created a commit or FF), or we restored exceptions, push.
+          if [ "$PRE_SHA" != "$POST_SHA" ] || [ "$CHANGED_EXCEPTIONS" -eq 1 ]; then
             git add -A
-            git commit -m "sync: prefer upstream (theirs), keep local exceptions; upstream=${{ steps.up.outputs.sha }}"
+            # commit only if we restored exceptions (merge already created a commit)
+            if [ "$CHANGED_EXCEPTIONS" -eq 1 ]; then
+              git commit -m "sync: prefer upstream (theirs), keep local exceptions; upstream=${POST_SHA}"
+              POST_SHA=$(git rev-parse HEAD)
+            fi
             git push origin "HEAD:${TARGET_BRANCH}"
+            echo "pushed=true" >> "$GITHUB_OUTPUT"
           else
-            echo "No effective changes after merge/restore."
+            echo "No effective changes to push."
+            echo "pushed=false" >> "$GITHUB_OUTPUT"
           fi
+
 
       - name: Dispatch build_release.yml on our branch
         if: steps.gate.outputs.build == 'true'
