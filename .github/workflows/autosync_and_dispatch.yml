@@ -1,0 +1,59 @@
+name: Auto-sync upstream and run build_release
+
+on:
+  schedule:
+    - cron: "17 3 * * *"  # daily at 03:17 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: write   # push updates
+  actions: write    # dispatch another workflow
+
+concurrency:
+  group: autosync-${{ github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  # ✏️ set these to the original repo/branch you follow,
+  # and your fork's default branch:
+  UPSTREAM_OWNER: DokiTeam
+  UPSTREAM_REPO: build-apps
+  UPSTREAM_REF: global
+  TARGET_BRANCH: global
+
+jobs:
+  sync-and-dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Add upstream & fetch
+        run: |
+          git remote add upstream https://github.com/${UPSTREAM_OWNER}/${UPSTREAM_REPO}.git || true
+          git fetch upstream ${UPSTREAM_REF}
+
+      - name: Detect if upstream is ahead
+        id: diff
+        run: |
+          AHEAD=$(git rev-list --count origin/${TARGET_BRANCH}..upstream/${UPSTREAM_REF} || echo 0)
+          echo "ahead=$AHEAD" >> $GITHUB_OUTPUT
+          if [ "$AHEAD" -gt 0 ]; then echo "changed=true" >> $GITHUB_OUTPUT; else echo "changed=false" >> $GITHUB_OUTPUT; fi
+
+      - name: Fast-forward fork
+        if: steps.diff.outputs.changed == 'true'
+        run: |
+          git checkout ${TARGET_BRANCH}
+          git merge --ff-only upstream/${UPSTREAM_REF}
+          git push origin HEAD:${TARGET_BRANCH}
+
+      # Dispatch the real build workflow on the UPDATED ref
+      - name: Run build_release.yml on updated branch
+        if: steps.diff.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run build_release.yml --ref ${TARGET_BRANCH}
+          echo "Dispatched build_release.yml on ${TARGET_BRANCH}"
