@@ -1,12 +1,12 @@
-# Automation for Doki (Source code)
+# Autobuilder for Doki (Fork)
 
 ### Please give the repo a :star:
 
 ### Usage
-**👉 Please follow [this document](https://github.com/DokiTeam/build-apps/tree/global/GUIDE.md) to know how this repository works.**
+**👉 Please follow [this document from original repository](https://github.com/DokiTeam/build-apps/tree/global/GUIDE.md) to know how this repository works.**
 
 ### Contribute
-**👋 You can contribute by push your patches about [these workflows](https://github.com/DokiTeam/build-apps/tree/global/.github/workflows) (Actions) to this repository.**
+**👋 You can contribute by push your patches about [these workflows](https://github.com/DokiTeam/build-apps/tree/global/.github/workflows) (Actions) to the original repository.**
 
 -----------------
 
